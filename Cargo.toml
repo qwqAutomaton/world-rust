@@ -1,0 +1,10 @@
+[package]
+name = "world-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hound = "3.5.1"
+num-complex = "0.4.6"
+rand = "0.9.2"
+realfft = "3.5.0"
