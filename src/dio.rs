@@ -1,16 +1,14 @@
-use crate::common::{
-    utils::{downsample, interp1},
-    window::get_nuttall_window,
-};
+use crate::common::utils::{EPS, downsample, interp1};
+use crate::common::window::nuttall_inplace;
 use num_complex::Complex64;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::{f64::consts::PI, sync::Arc};
 
 pub mod f0; // f0 contours
-pub mod zc; // zero crossings
+pub mod stonemask;
+pub mod zc; // zero crossings // StoneMask optimization
 
 pub const CUTOFF_FREQ: f64 = 50.0;
-pub const EPS: f64 = 1e-12;
 pub const SCORE_MAX: f64 = 100000.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -145,33 +143,42 @@ fn get_best_f0_contour(
 ///
 /// # 返回值
 /// 返回滤波后的时域信号向量
-fn get_filtered_signal(
+fn get_filtered_signal<'a>(
     half_average_length: usize,
     spec: &[Complex64],
     fft_size: usize,
     y_length: usize,
     r2c: &Arc<dyn RealToComplex<f64>>,
     c2r: &Arc<dyn ComplexToReal<f64>>,
-) -> Vec<f64> {
-    // 创建 Nuttall 低通滤波器
-    let mut lpf = get_nuttall_window(half_average_length * 4);
-    lpf.resize(fft_size, 0.0);
+    scratch: &'a mut DioFilterScratch,
+) -> &'a [f64] {
+    // 确保缓冲尺寸
+    scratch.ensure_size(fft_size);
 
-    // 转换到频域并与输入频谱卷积
-    let mut fspec = r2c.make_output_vec();
-    r2c.process(&mut lpf, &mut fspec)
+    // 生成长度为 half_average_length*4 的 Nuttall 窗，写入 lpf 前部，其余清零
+    let win_len = half_average_length * 4;
+    nuttall_inplace(win_len, &mut scratch.lpf[..win_len]);
+    for v in &mut scratch.lpf[win_len..] {
+        *v = 0.0;
+    }
+
+    // 窗的频谱
+    r2c.process(&mut scratch.lpf, &mut scratch.fspec)
         .expect("r2c failed for Nuttall LPF.");
 
-    let mut conv: Vec<Complex64> = spec.iter().zip(fspec.iter()).map(|(a, b)| a * b).collect();
+    // 卷积（逐点乘）
+    let hb = fft_size / 2 + 1;
+    for k in 0..hb {
+        scratch.conv[k] = spec[k] * scratch.fspec[k];
+    }
 
     // IFFT 回时域
-    let mut filtered = c2r.make_output_vec();
-    c2r.process(&mut conv, &mut filtered)
+    c2r.process(&mut scratch.conv, &mut scratch.filtered)
         .expect("c2r inverse failed");
 
-    // 提取所需的输出片段
+    // 提取所需的输出片段（借用切片，避免分配）
     let start = half_average_length * 2;
-    filtered[start..start + y_length].to_vec()
+    &scratch.filtered[start..start + y_length]
 }
 
 /// 从四组插值 f0 计算该频带的候选 f0 和评分。
@@ -309,9 +316,11 @@ fn get_f0_candidate_from_raw_event(
     tpos: &[f64],
     r2c: &Arc<dyn RealToComplex<f64>>,
     c2r: &Arc<dyn ComplexToReal<f64>>,
+    scratch: &mut DioFilterScratch,
 ) -> (Vec<f64>, Vec<f64>) {
     let half = (fs / boundary_f0 / 2.0).round() as usize;
-    let filtered_signal = get_filtered_signal(half, y_spectrum, fft_size, y_length, &r2c, &c2r);
+    let filtered_signal =
+        get_filtered_signal(half, y_spectrum, fft_size, y_length, &r2c, &c2r, scratch);
 
     let zc = zc::get_four_zero_crossing_intervals(&filtered_signal, y_length, fs);
 
@@ -349,24 +358,32 @@ fn get_f0_candidates_and_scores(
     r2c: &Arc<dyn RealToComplex<f64>>,
     c2r: &Arc<dyn ComplexToReal<f64>>,
 ) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
-    bounds
-        .iter()
-        .map(|&boundary| {
-            let (f0_candidate, f0_score) = get_f0_candidate_from_raw_event(
-                boundary, actual_fs, y_spectrum, y_length, fft_size, f0_floor, f0_ceil, tpos, r2c,
-                c2r,
-            );
-
-            // 归一化评分
-            let normalized_score: Vec<f64> = f0_score
-                .iter()
-                .zip(f0_candidate.iter())
-                .map(|(s, f)| s / (f + EPS))
-                .collect();
-
-            (f0_candidate, normalized_score)
-        })
-        .unzip()
+    let mut scratch = DioFilterScratch::default();
+    let mut candidates: Vec<Vec<f64>> = Vec::with_capacity(bounds.len());
+    let mut scores: Vec<Vec<f64>> = Vec::with_capacity(bounds.len());
+    for &boundary in bounds.iter() {
+        let (f0_candidate, f0_score) = get_f0_candidate_from_raw_event(
+            boundary,
+            actual_fs,
+            y_spectrum,
+            y_length,
+            fft_size,
+            f0_floor,
+            f0_ceil,
+            tpos,
+            r2c,
+            c2r,
+            &mut scratch,
+        );
+        let normalized_score: Vec<f64> = f0_score
+            .iter()
+            .zip(f0_candidate.iter())
+            .map(|(s, f)| s / (f + EPS))
+            .collect();
+        candidates.push(f0_candidate);
+        scores.push(normalized_score);
+    }
+    (candidates, scores)
 }
 
 /// DIO 算法的核心实现。
@@ -454,6 +471,36 @@ fn dio_general_body(
     (temporal_positions, fixed)
 }
 
+// 就地 Nuttall 窗填充，系数与 common::window::nuttall 保持一致
+// fill_nuttall_into 已移动到 common::window 模块
+
+// DIO 低通卷积阶段复用缓冲
+#[derive(Default)]
+struct DioFilterScratch {
+    lpf: Vec<f64>,
+    fspec: Vec<Complex64>,
+    conv: Vec<Complex64>,
+    filtered: Vec<f64>,
+}
+
+impl DioFilterScratch {
+    fn ensure_size(&mut self, fft_size: usize) {
+        if self.lpf.len() != fft_size {
+            self.lpf.resize(fft_size, 0.0);
+        }
+        let hb = fft_size / 2 + 1;
+        if self.fspec.len() != hb {
+            self.fspec.resize(hb, Complex64::new(0.0, 0.0));
+        }
+        if self.conv.len() != hb {
+            self.conv.resize(hb, Complex64::new(0.0, 0.0));
+        }
+        if self.filtered.len() != fft_size {
+            self.filtered.resize(fft_size, 0.0);
+        }
+    }
+}
+
 /// 执行 DIO (Distributed Inline-filter Operation) 基频估计算法。
 ///
 /// # 参数
@@ -464,6 +511,7 @@ fn dio_general_body(
 /// # 返回值
 /// 返回 F0Contour 结构体,包含时间轴和对应的 f0 值
 pub fn dio(x: &[f64], fs: u32, option: &DioOption) -> F0Contour {
+    let start = std::time::Instant::now();
     let (tpos, f0) = dio_general_body(
         x,
         fs,
@@ -474,6 +522,9 @@ pub fn dio(x: &[f64], fs: u32, option: &DioOption) -> F0Contour {
         option.speed,
         option.allowed_range,
     );
-
-    F0Contour { f0, tpos }
+    eprintln!("DIO done. Time: {:?}", start.elapsed());
+    let start = std::time::Instant::now();
+    let refined = stonemask::refine_f0_contour(x, &f0, &tpos, fs);
+    eprintln!("StoneMask done. Time: {:?}", start.elapsed());
+    F0Contour { f0: refined, tpos }
 }

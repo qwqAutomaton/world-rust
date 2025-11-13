@@ -1,145 +1,9 @@
-/// Fix 步骤 1: 过滤短时异常跳变,生成初步平滑的 f0。
-///
-/// # 参数
-/// - `f0`: 输入 f0 序列
-/// - `voice_range_minimum`: 最小浊音段长度
-/// - `allowed_range`: 允许的相对变化范围
-///
-/// # 返回值
-/// 返回平滑后的 f0 向量
-fn fix_step1(f0: &[f64], voice_range_minimum: usize, allowed_range: f64) -> Vec<f64> {
-    let len = f0.len();
+use crate::common::utils::EPS;
 
-    // 构建 f0_base: 去掉首尾的 voice_range_minimum 帧
-    let f0_base: Vec<f64> = if len > voice_range_minimum * 2 {
-        (0..len)
-            .map(|i| {
-                if i >= voice_range_minimum && i < len - voice_range_minimum {
-                    f0[i]
-                } else {
-                    0.0
-                }
-            })
-            .collect()
-    } else {
-        vec![0.0; len]
-    };
-
-    // 检查相邻帧的跳变
-    (0..len)
-        .map(|i| {
-            if i < voice_range_minimum {
-                0.0
-            } else {
-                let change_ratio = (f0_base[i] - f0_base[i - 1]).abs() / (f0_base[i] + super::EPS);
-                if change_ratio < allowed_range {
-                    f0_base[i]
-                } else {
-                    0.0
-                }
-            }
-        })
-        .collect()
-}
-/// Fix 步骤 2: 局部一致性检查,去除孤立的浊音帧。
-///
-/// # 参数
-/// - `f0_step1`: 步骤 1 的输出
-/// - `f0_length`: 帧数
-/// - `voice_range_minimum`: 最小浊音段长度
-///
-/// # 返回值
-/// 返回检查后的 f0 向量
-fn fix_step2(f0_step1: &[f64], f0_length: usize, voice_range_minimum: usize) -> Vec<f64> {
-    let center = (voice_range_minimum - 1) / 2;
-
-    (0..f0_length)
-        .map(|i| {
-            if i < center || i >= f0_length - center {
-                f0_step1[i]
-            } else {
-                // 检查窗口内是否有任何0值
-                let has_zero = (i - center..=i + center).any(|j| f0_step1[j] == 0.0);
-                if has_zero { 0.0 } else { f0_step1[i] }
-            }
-        })
-        .collect()
-}
-/// Fix 步骤 3: 向前扩展浊音段,填补浊音段末尾的缺失 f0。
-///
-/// # 参数
-/// - `f0_step2`: 步骤 2 的输出
-/// - `f0_length`: 帧数
-/// - `f0_candidates`: 所有频带的候选 f0
-/// - `allowed_range`: 允许的相对变化范围
-/// - `negative_index`: 浊音段结束帧索引列表
-///
-/// # 返回值
-/// 返回向前扩展后的 f0 向量
-fn fix_step3(
-    f0_step2: &[f64],
-    f0_length: usize,
-    f0_candidates: &[Vec<f64>],
-    allowed_range: f64,
-    negative_index: &[usize],
-) -> Vec<f64> {
-    let mut f0_step3 = vec![0.0_f64; f0_length];
-    f0_step3.copy_from_slice(f0_step2);
-    for (i, &neg_idx) in negative_index.iter().enumerate() {
-        let limit = if i == negative_index.len() - 1 {
-            f0_length - 1
-        } else {
-            negative_index[i + 1]
-        };
-        for j in neg_idx..limit {
-            let prev = if j >= 1 { f0_step3[j - 1] } else { 0.0 };
-            f0_step3[j + 1] =
-                select_best_f0(f0_step3[j], prev, f0_candidates, j + 1, allowed_range);
-            if f0_step3[j + 1] == 0.0 {
-                break;
-            }
-        }
-    }
-
-    f0_step3
-}
-/// Fix 步骤 4: 向后扩展浊音段,填补浊音段开头的缺失 f0。
-///
-/// # 参数
-/// - `f0_step3`: 步骤 3 的输出
-/// - `f0_candidates`: 所有频带的候选 f0
-/// - `allowed_range`: 允许的相对变化范围
-/// - `positive_index`: 浊音段起始帧索引列表
-///
-/// # 返回值
-/// 返回向后扩展后的 f0 向量
-fn fix_step4(
-    f0_step3: &[f64],
-    f0_candidates: &[Vec<f64>],
-    allowed_range: f64,
-    positive_index: &[usize],
-) -> Vec<f64> {
-    let mut f0_step4 = f0_step3.to_vec();
-
-    if positive_index.is_empty() {
-        return f0_step4;
-    }
-
-    for i in (0..positive_index.len()).rev() {
-        let idx = positive_index[i];
-        let limit = if i == 0 { 1 } else { positive_index[i - 1] };
-
-        for j in (limit..idx).rev() {
-            let next = f0_step4.get(j + 1).copied().unwrap_or(0.0);
-            f0_step4[j] = select_best_f0(f0_step4[j + 1], next, f0_candidates, j, allowed_range);
-            if f0_step4[j] == 0.0 {
-                break;
-            }
-        }
-    }
-
-    f0_step4
-}
+// 旧的分配版 fix_step1 已移除；见 fix_step1_into
+// 旧的分配版 fix_step2 已移除；见 fix_step2_into
+// 旧的分配版 fix_step3 已移除；见 fix_step3_inplace
+// 旧的分配版 fix_step4 已移除；见 fix_step4_inplace
 /// 完整的 f0 修正流程,组合多个步骤得到最终平滑的 f0 轮廓。
 ///
 /// # 参数
@@ -149,9 +13,8 @@ fn fix_step4(
 /// - `f0_length`: 帧数
 /// - `f0_floor`: f0 下限
 /// - `allowed_range`: 允许的相对变化范围
-///
 /// # 返回值
-/// 返回修正后的 f0 向量
+/// 返回修正后的 f0 向量（使用 FixF0Scratch）。
 pub fn fix_f0_contour(
     frame_period: f64,
     f0_candidates: &[Vec<f64>],
@@ -160,30 +23,186 @@ pub fn fix_f0_contour(
     f0_floor: f64,
     allowed_range: f64,
 ) -> Vec<f64> {
-    let voice_range_minimum = ((0.5 + 1000.0 / frame_period / f0_floor) as i32 * 2 + 1) as usize;
+    let mut scratch = FixF0Scratch::default();
+    fix_f0_contour_with_scratch(
+        frame_period,
+        f0_candidates,
+        best_f0_contour,
+        f0_length,
+        f0_floor,
+        allowed_range,
+        &mut scratch,
+    )
+}
+
+/// 与 fix_f0_contour 等价，但允许复用内部缓冲减少分配。
+pub fn fix_f0_contour_with_scratch(
+    frame_period: f64,
+    f0_candidates: &[Vec<f64>],
+    best_f0_contour: &[f64],
+    f0_length: usize,
+    f0_floor: f64,
+    allowed_range: f64,
+    scratch: &mut FixF0Scratch,
+) -> Vec<f64> {
+    let voice_range_minimum =
+        ((1000.0 / frame_period / f0_floor).round() as usize * 2 + 1) as usize;
     if f0_length <= voice_range_minimum {
         return vec![0.0_f64; f0_length];
     }
 
-    // 排除跳变，跳变了赋 0
-    let f0_tmp1 = fix_step1(best_f0_contour, voice_range_minimum, allowed_range);
+    scratch.ensure_len(f0_length);
 
-    // 给上面赋 0 的帧做插值补上
-    let f0_tmp2 = fix_step2(&f0_tmp1, f0_length, voice_range_minimum);
+    // step1 -> tmp
+    // 先按原算法生成一步结果（需要 into 版本改造时可替换）
+    fix_step1_into(
+        best_f0_contour,
+        voice_range_minimum,
+        allowed_range,
+        &mut scratch.tmp,
+    );
 
-    // 检测浊音段
-    let (positive_index, negative_index) = get_number_of_voiced_sections(&f0_tmp2, f0_length);
+    // step2 -> out（线性时间）
+    let mut out = vec![0.0_f64; f0_length];
+    fix_step2_into(&scratch.tmp, f0_length, voice_range_minimum, &mut out);
 
-    let f0_tmp1 = fix_step3(
-        &f0_tmp2,
+    // 浊音段边界
+    compute_voiced_sections(
+        &out,
         f0_length,
+        &mut scratch.positive_index,
+        &mut scratch.negative_index,
+    );
+
+    // step3 forward（就地）
+    fix_step3_inplace(
+        &mut out,
         f0_candidates,
         allowed_range,
-        &negative_index,
+        &scratch.negative_index,
     );
-    let fixed_f0_contour = fix_step4(&f0_tmp1, f0_candidates, allowed_range, &positive_index);
 
-    fixed_f0_contour
+    // step4 backward（就地）
+    fix_step4_inplace(
+        &mut out,
+        f0_candidates,
+        allowed_range,
+        &scratch.positive_index,
+    );
+
+    out
+}
+
+// 内部：就地/into 变体
+fn fix_step1_into(f0: &[f64], voice_range_minimum: usize, allowed_range: f64, out: &mut [f64]) {
+    let len = f0.len();
+    debug_assert_eq!(out.len(), len);
+
+    for i in 0..len {
+        if i < voice_range_minimum || i >= len.saturating_sub(voice_range_minimum) {
+            out[i] = 0.0;
+            continue;
+        }
+
+        let cur = f0[i];
+        let prev =
+            if i >= 1 && (i - 1) >= voice_range_minimum && (i - 1) < len - voice_range_minimum {
+                f0[i - 1]
+            } else {
+                0.0
+            };
+        let change_ratio = (cur - prev).abs() / (cur + EPS);
+        out[i] = if change_ratio < allowed_range {
+            cur
+        } else {
+            0.0
+        };
+    }
+}
+
+/// Step2: 小窗口直接扫描（O(n*w)），w 很小时常数更优。
+fn fix_step2_into(f0: &[f64], f0_length: usize, voice_range_minimum: usize, out: &mut [f64]) {
+    let center = (voice_range_minimum - 1) / 2;
+    for i in 0..f0_length {
+        if i < center || i >= f0_length - center {
+            out[i] = f0[i];
+        } else {
+            let l = i - center;
+            let r = i + center;
+            let mut has_zero = false;
+            for j in l..=r {
+                if f0[j].abs() < EPS {
+                    has_zero = true;
+                    break;
+                }
+            }
+            out[i] = if has_zero { 0.0 } else { f0[i] };
+        }
+    }
+}
+
+fn compute_voiced_sections(
+    f0: &[f64],
+    f0_length: usize,
+    positive_index: &mut Vec<usize>,
+    negative_index: &mut Vec<usize>,
+) {
+    positive_index.clear();
+    negative_index.clear();
+    for i in 1..f0_length {
+        match (f0[i - 1] == 0.0, f0[i] == 0.0) {
+            (true, false) => positive_index.push(i),     // 从清音到浊音
+            (false, true) => negative_index.push(i - 1), // 从浊音到清音
+            _ => {}
+        }
+    }
+}
+
+fn fix_step3_inplace(
+    out: &mut [f64],
+    f0_candidates: &[Vec<f64>],
+    allowed_range: f64,
+    negative_index: &[usize],
+) {
+    let f0_length = out.len();
+    for (i, &neg_idx) in negative_index.iter().enumerate() {
+        let limit = if i == negative_index.len() - 1 {
+            f0_length - 1
+        } else {
+            negative_index[i + 1]
+        };
+        for j in neg_idx..limit {
+            let prev = if j >= 1 { out[j - 1] } else { 0.0 };
+            out[j + 1] = select_best_f0(out[j], prev, f0_candidates, j + 1, allowed_range);
+            if out[j + 1] == 0.0 {
+                break;
+            }
+        }
+    }
+}
+
+fn fix_step4_inplace(
+    out: &mut [f64],
+    f0_candidates: &[Vec<f64>],
+    allowed_range: f64,
+    positive_index: &[usize],
+) {
+    if positive_index.is_empty() {
+        return;
+    }
+
+    for i in (0..positive_index.len()).rev() {
+        let idx = positive_index[i];
+        let limit = if i == 0 { 1 } else { positive_index[i - 1] };
+
+        for j in (limit..idx).rev() {
+            let next = out.get(j + 1).copied().unwrap_or(0.0);
+            out[j] = select_best_f0(out[j + 1], next, f0_candidates, j, allowed_range);
+            if out[j] == 0.0 {
+                break;
+            }
+        }
+    }
 }
 /// 检测浊音段的起止边界。
 ///
@@ -193,20 +212,7 @@ pub fn fix_f0_contour(
 ///
 /// # 返回值
 /// 返回元组 (positive_index, negative_index),分别表示浊音段的起始和结束帧索引
-fn get_number_of_voiced_sections(f0: &[f64], f0_length: usize) -> (Vec<usize>, Vec<usize>) {
-    let mut positive_index = Vec::new();
-    let mut negative_index = Vec::new();
-
-    for i in 1..f0_length {
-        match (f0[i - 1] == 0.0, f0[i] == 0.0) {
-            (true, false) => positive_index.push(i),     // 从清音到浊音
-            (false, true) => negative_index.push(i - 1), // 从浊音到清音
-            _ => {}
-        }
-    }
-
-    (positive_index, negative_index)
-}
+// 旧的返回元组版 get_number_of_voiced_sections 已移除；见 compute_voiced_sections
 /// 基于参考值从候选 f0 中选择最优 f0。
 ///
 /// # 参数
@@ -241,5 +247,23 @@ fn select_best_f0(
         0.0
     } else {
         best_f0
+    }
+}
+
+/// DIO 修正阶段可复用的缓冲区，减少临时分配。
+#[derive(Default)]
+pub struct FixF0Scratch {
+    // step1 输出暂存
+    tmp: Vec<f64>,
+    // 浊音段边界缓存
+    positive_index: Vec<usize>,
+    negative_index: Vec<usize>,
+}
+
+impl FixF0Scratch {
+    fn ensure_len(&mut self, n: usize) {
+        if self.tmp.len() != n {
+            self.tmp.resize(n, 0.0);
+        }
     }
 }

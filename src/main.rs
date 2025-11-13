@@ -1,5 +1,5 @@
 use hound;
-use std::io::{BufWriter, Read, Result, Write};
+use std::io::Read;
 mod common;
 pub mod dio;
 fn f0_contour(samples: &[f64], fs: u32, speed: u32) -> dio::F0Contour {
@@ -24,17 +24,7 @@ fn f0_contour(samples: &[f64], fs: u32, speed: u32) -> dio::F0Contour {
 // ) -> Vec<Vec<f64>> {
 //     Vec::new()
 // }
-fn write_2darray(data: &[Vec<f64>], path: &str) -> Result<()> {
-    let f = std::fs::File::create(path)?;
-    let mut writer = BufWriter::new(f);
-    for row in data {
-        for val in row.iter() {
-            write!(writer, "{} ", val)?;
-        }
-        writeln!(writer, "")?;
-    }
-    Ok(())
-}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if let Some(filename) = args.get(1) {
@@ -72,11 +62,17 @@ fn main() {
         }
         // wave info
         println!("{:#?}", spec);
-        println!("Analysis start...");
+        println!("Reading samples...");
         let samples = reader
             .samples::<i16>()
             .map(|x| x.unwrap() as f64)
             .collect::<Vec<f64>>();
+        println!(
+            "Length: {} samples, {:.3} seconds",
+            samples.len(),
+            samples.len() as f64 / spec.sample_rate as f64
+        );
+        println!("Analysis start...");
         let fs = spec.sample_rate;
         let start = std::time::Instant::now();
         let r = match args.get(2) {
@@ -84,7 +80,7 @@ fn main() {
             None => 1,
         };
         let f0 = f0_contour(&samples, fs, r);
-        eprintln!("DIO done. Time: {:?}", start.elapsed());
+        eprintln!("DIO done (with stonemask). Time: {:?}", start.elapsed());
         // todo
         // let start = std::time::Instant::now();
         // let spenv: Vec<Vec<f64>> = spectrum_envelope(&samples, fs, &f0);

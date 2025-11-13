@@ -1,5 +1,4 @@
 /target
 /assets
-/src/_*
+/src/**/_*
 **/.DS_Store
-world-rust
