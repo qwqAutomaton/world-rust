@@ -1,6 +1,5 @@
 use std::f64::consts::PI;
 
-
 /// 就地填充 Nuttall 窗（系数与 `nuttall` 完全一致）。
 #[inline]
 pub fn nuttall_inplace(length: usize, out: &mut [f64]) {
@@ -11,9 +10,7 @@ pub fn nuttall_inplace(length: usize, out: &mut [f64]) {
     for i in 0..length {
         let ratio = i as f64 / len_minus_1;
         let two_pi_ratio = 2.0 * PI * ratio;
-        out[i] = 0.355768
-            - 0.487396 * two_pi_ratio.cos()
-            + 0.144232 * (2.0 * two_pi_ratio).cos()
+        out[i] = 0.355768 - 0.487396 * two_pi_ratio.cos() + 0.144232 * (2.0 * two_pi_ratio).cos()
             - 0.012604 * (3.0 * two_pi_ratio).cos();
     }
 }
@@ -21,7 +18,13 @@ pub fn nuttall_inplace(length: usize, out: &mut [f64]) {
 /// 就地填充 Blackman 型主窗（StoneMask 用）。
 /// index_raw 使用与 WORLD 一致的时间对齐方式：tmp = (raw - 1)/fs - tpos。
 #[inline]
-pub fn blackman_inplace(index_raw: &[isize], window_time: f64, fs: f64, tpos: f64, out: &mut [f64]) {
+pub fn blackman_inplace(
+    index_raw: &[isize],
+    window_time: f64,
+    fs: f64,
+    tpos: f64,
+    out: &mut [f64],
+) {
     for (i, &raw) in index_raw.iter().enumerate() {
         let tmp = (raw as f64 - 1.0) / fs - tpos;
         out[i] = 0.42

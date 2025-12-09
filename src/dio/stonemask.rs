@@ -1,8 +1,8 @@
 use std::{f64::consts::PI, sync::Arc};
 
+use crate::common::window::{blackman_inplace, differential_inplace};
 use num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
-use crate::common::window::{blackman_inplace, differential_inplace};
 
 const STONEMASK_F0_FLOOR: f64 = 40.0;
 const STONEMASK_THRESHOLD: f64 = 0.2;
@@ -79,12 +79,20 @@ fn mean_f0(
     }
 
     // 窗函数与微分窗（复用缓冲）
-    blackman_inplace(&scratch.index_raw, window_time, fs as f64, tpos, &mut scratch.main_window);
+    blackman_inplace(
+        &scratch.index_raw,
+        window_time,
+        fs as f64,
+        tpos,
+        &mut scratch.main_window,
+    );
     differential_inplace(&scratch.main_window, &mut scratch.diff_window);
 
     // 裁剪索引并写入 FFT 输入
     for i in 0..window_length {
-        let idx = scratch.index_raw[i].saturating_sub(1).clamp(0, (x.len() - 1) as isize) as usize;
+        let idx = scratch.index_raw[i]
+            .saturating_sub(1)
+            .clamp(0, (x.len() - 1) as isize) as usize;
         scratch.indices[i] = idx;
         scratch.in_main[i] = x[idx] * scratch.main_window[i];
         scratch.in_diff[i] = x[idx] * scratch.diff_window[i];
@@ -212,7 +220,12 @@ impl StoneMaskScratch {
         }
     }
 
-    fn ensure_size(&mut self, planner: &mut RealFftPlanner<f64>, fftsize: usize, window_len: usize) {
+    fn ensure_size(
+        &mut self,
+        planner: &mut RealFftPlanner<f64>,
+        fftsize: usize,
+        window_len: usize,
+    ) {
         if self.fftsize != fftsize {
             self.fftsize = fftsize;
             self.r2c = Some(planner.plan_fft_forward(fftsize));

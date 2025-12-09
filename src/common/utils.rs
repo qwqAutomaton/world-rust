@@ -1,4 +1,4 @@
-pub const EPS: f64 = 1e-12;
+pub const EPS: f64 = 1e-10;
 
 /// 对信号进行带抗混叠滤波的下采样。
 ///
@@ -157,4 +157,111 @@ pub fn interp1(xp: &[f64], fp: &[f64], x: &[f64]) -> Vec<f64> {
             fp[idx] + t * (fp[idx + 1] - fp[idx])
         })
         .collect()
+}
+
+/// interp1q: 快速线性插值，仿照 WORLD C++ 版本
+/// x: 起点（等间隔），shift: 间隔，y: 原始数据，xi: 目标点
+pub fn interp1q(x: f64, shift: f64, y: &[f64], xi: &[f64]) -> Vec<f64> {
+    let x_length = y.len();
+    let xi_length = xi.len();
+    let mut yi = vec![0.0; xi_length];
+    let mut delta_y = vec![0.0; x_length];
+    for i in 0..x_length - 1 {
+        delta_y[i] = y[i + 1] - y[i];
+    }
+    delta_y[x_length - 1] = 0.0;
+
+    // ...existing code...
+    for i in 0..xi_length {
+        let base = ((xi[i] - x) / shift).floor() as isize;
+        let frac = (xi[i] - x) / shift - base as f64;
+        let base = base.clamp(0, (x_length - 1) as isize) as usize;
+        yi[i] = y[base] + delta_y[base] * frac;
+    }
+    yi
+}
+
+pub fn linear_smoothing(input: &[f64], width: f64, fs: u32, fft_size: usize) -> Vec<f64> {
+    let boundary = (width * fft_size as f64 / fs as f64).round() as usize + 1;
+    let fft_size_half = fft_size / 2;
+
+    let mut mirroring_spectrum = vec![0.0; fft_size_half + 2 * boundary + 1];
+    let mut mirroring_segment = vec![0.0; fft_size_half + 2 * boundary + 1];
+    let mut frequency_axis = vec![0.0; fft_size_half + 1];
+
+    //
+    for i in 0..boundary {
+        mirroring_spectrum[i] = input[boundary - i];
+    }
+    for i in 0..=fft_size_half {
+        mirroring_spectrum[i + boundary] = input[i];
+    }
+    for i in 0..boundary {
+        mirroring_spectrum[fft_size_half + boundary + 1 + i] = input[fft_size_half - 1 - i];
+    }
+
+    mirroring_segment[0] = mirroring_spectrum[0] * fs as f64 / fft_size as f64;
+    for i in 1..mirroring_segment.len() {
+        mirroring_segment[i] =
+            mirroring_spectrum[i] * fs as f64 / fft_size as f64 + mirroring_segment[i - 1];
+    }
+
+    for i in 0..=fft_size_half {
+        frequency_axis[i] = i as f64 / fft_size as f64 * fs as f64 - width / 2.0;
+    }
+
+    let origin_of_mirroring_axis = -(boundary as f64 - 0.5) * fs as f64 / fft_size as f64;
+    let discrete_frequency_interval = fs as f64 / fft_size as f64;
+
+    let low_levels = interp1q(
+        origin_of_mirroring_axis,
+        discrete_frequency_interval,
+        &mirroring_segment,
+        &frequency_axis,
+    );
+
+    for i in 0..=fft_size_half {
+        frequency_axis[i] += width;
+    }
+
+    let high_levels = interp1q(
+        origin_of_mirroring_axis,
+        discrete_frequency_interval,
+        &mirroring_segment,
+        &frequency_axis,
+    );
+
+    let mut output = vec![0.0; fft_size_half + 1];
+    for i in 0..=fft_size_half {
+        output[i] = (high_levels[i] - low_levels[i]) / width;
+    }
+    output
+}
+
+pub fn dc_fix(input: &[f64], f0: f64, fs: u32, fft_size: usize) -> Vec<f64> {
+    let mut output = input.to_vec();
+    let upper_limit = (2.0 + f0 * fft_size as f64 / fs as f64) as usize;
+    if upper_limit >= input.len() {
+        return output;
+    }
+
+    let low_frequency_axis: Vec<f64> = (0..upper_limit)
+        .map(|i| i as f64 * fs as f64 / fft_size as f64)
+        .collect();
+
+    let upper_limit_replica = upper_limit;
+
+    // C++ interp1Q in this case is equivalent to interp1 with reversed x-axis
+    let replica_x_axis: Vec<f64> = low_frequency_axis.iter().map(|&x| f0 - x).collect();
+    let input_x_axis: Vec<f64> = (0..input.len())
+        .map(|i| i as f64 * fs as f64 / fft_size as f64)
+        .collect();
+
+    let low_frequency_replica = interp1(&input_x_axis, input, &replica_x_axis);
+
+    for i in 0..upper_limit_replica {
+        output[i] += low_frequency_replica[i];
+    }
+
+    output
 }
